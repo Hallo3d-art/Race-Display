@@ -1,0 +1,14 @@
+# //ai
+# personal GPX tracks contain locations and times - never commit them
+*.gpx
+!example.gpx
+
+# generated output
+output_*/
+
+# private files (e.g. reference projects)
+_private/
+
+# Python
+__pycache__/
+*.pyc
