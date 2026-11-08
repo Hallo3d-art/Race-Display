@@ -1,1 +1,67 @@
+# ai
+# Builds a standalone Windows .exe (no Python needed) with PyInstaller.
+#  - every push / pull request: build + smoke test, exe available as workflow artifact
+#  - tag "v*" (e.g. v1.0.0): additionally attached as ZIP to a GitHub release
+name: Build Windows exe
 
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to create the release on tags
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build exe
+        run: >
+          pyinstaller --onefile --console --name gpx_medal_tile
+          --add-data "bambu_project_settings.config;."
+          --collect-data trimesh
+          --collect-all manifold3d
+          --collect-all mapbox_earcut
+          gpx_medal_tile.py
+
+      - name: Smoke test with example.gpx
+        shell: pwsh
+        run: |
+          .\dist\gpx_medal_tile.exe example.gpx --race "Boston Marathon" --name "Hallo3d" --time 3:30:00 --distance 42.195 --out test_output
+          if ($LASTEXITCODE -ne 0) { throw "exe failed with exit code $LASTEXITCODE" }
+          foreach ($f in "Boston_Marathon_tile_multicolor.3mf", "Boston_Marathon_1_tile_base.stl", "wall_frame.stl") {
+            if (-not (Test-Path "test_output\$f")) { throw "missing output file $f" }
+          }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package | Out-Null
+          Copy-Item dist\gpx_medal_tile.exe, bambu_project_settings.config, example.gpx, README.md, LICENSE.md package\
+          Compress-Archive -Path package\* -DestinationPath gpx_medal_tile_windows.zip -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gpx_medal_tile_windows
+          path: gpx_medal_tile_windows.zip
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: gpx_medal_tile_windows.zip
+          generate_release_notes: true
