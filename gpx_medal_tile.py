@@ -1,15 +1,23 @@
 # //ai
 #!/usr/bin/env python3
 """
-GPX Medal Tile - generates a wall-mountable hex tile with
-  * a raised route (Strava orange) from a GPX file
-  * race name, date/distance, athlete name, finish time, pace
-  * a ribbon slot for medals of any shape/size (ribbon 20-40 mm)
-  * dovetail pockets on all 6 edges (tiles can be joined)
-  * magnet pockets for the wall frame
-plus a wall frame (keyholes), a ribbon clamp and connector keys.
+GPX Medal Tile - turns a GPX track into a 3D-printable, wall-mounted hex tile that
+shows the route and holds the finisher medal.
 
-Designed for the Bambu Lab P1S (256 x 256 mm): tile is 240 mm across the corners.
+Tile:
+  * raised route in orange (GPS noise smoothed), start ring / finish dot
+  * race name, date, distance, athlete name, finish time and pace
+  * ribbon slot for medals of any shape (up to approx. 95 mm, ribbons 20-40 mm)
+  * 6 corner holes for the locating pins and 4 snap pockets for the wall frame
+Accessories (one set per tile):
+  * wall frame: 3 countersunk screw holes, 6 pins, 4 snap latches, dovetail pockets
+    on the front side to join neighbouring frames into an expandable honeycomb wall
+  * ribbon clamp (stepless medal height), ribbon winder with 2 spring clips
+  * dovetail connector keys
+
+Output: STL files per part and a ready Bambu Studio project (.3mf, 2 plates).
+Designed for the Bambu Lab P1S (256 x 256 mm bed): tile 239.4 mm across the corners
+on a 240 mm honeycomb grid (0.5 mm gap between neighbours).
 
 Usage:
   python gpx_medal_tile.py run.gpx --race "Vienna City Marathon" --name "Alex" --time 3:28:45
@@ -36,7 +44,8 @@ from matplotlib.font_manager import FontProperties
 # Parameters (mm)
 # --------------------------------------------------------------------------
 P = dict(
-    R=120.0,            # hex radius (across corners / 2) -> 240 mm, fits the P1S
+    grid_R=120.0,       # honeycomb grid: hex radius of one cell (across corners / 2) -> 240 mm
+    R=119.7,            # tile radius: 0.3 mm smaller than the grid -> 0.5 mm gap to neighbours (print tolerance)
     base_t=5.0,         # base plate thickness (anthracite)
     text_h=0.8,         # raised text (white)          -> top at 5.8
     orange_h=2.0,       # raised route & time (orange) -> top at 7.0
@@ -47,13 +56,30 @@ P = dict(
     medal_max=95.0,     # medal diameter the free area is designed for (preview only)
     # dovetail (bowtie) pocket on every edge
     dt_len=10.0, dt_end=14.0, dt_waist=7.0, dt_depth=3.0, key_t=2.7, key_clear=0.15,
-    # 6x3 mm magnets in the corners
-    mag_d=6.2, mag_depth=3.2, mag_r=110.0,
+    # locating: 6 holes in the tile corners, matching pins on the frame (no magnets)
+    loc_r=110.0,                        # radius of hole / pin centres (in the corners)
+    loc_hole_d=6.2, loc_hole_depth=3.6,  # hole in the back of the tile (corners, no text above)
+    loc_pin_d=5.6, loc_pin_h=3.0,        # pin: 0.3 mm per side, 0.6 mm in depth; taller than the latches (2.6)
+    loc_pin_chamfer=0.8,                # lead-in chamfer at the pin tip
     # ribbon clamp: pins pressed into blind holes below the slot
-    pin_hole_d=4.0, pin_hole_depth=3.0, pin_d=3.8, pin_len=2.7, pin_dx=29.0, clamp_y=3.0,
+    pin_hole_d=4.0, pin_hole_depth=3.0, pin_dx=29.0, clamp_y=3.0,
+    pin_d=4.3, pin_len=3.4, pin_slit=0.9,   # slotted press-fit pins: 4.3 mm, squeezed into the 4.0 mm hole
     clamp_len=68.0, clamp_w=8.0, clamp_t=4.0,
+    # ribbon winder: flat card, the excess ribbon loop is rolled up on its waist
+    winder_len=60.0, winder_w=56.0, winder_waist_len=48.0, winder_waist_w=44.0, winder_t=3.0,
+    # spring clip that is pushed over the wound card so the ribbon cannot unwind
+    clip_gap=3.0, clip_arm=28.0, clip_t=1.6, clip_w=10.0, clip_bump=0.6,
+    # snap latches: 4 flexible arms on the frame, pockets with an undercut in the tile back
+    snap_u=20.0,                        # offset along the top and bottom edge from the middle
+    snap_w=10.0, snap_t=1.8, snap_base=2.0,  # arm width, thickness, height where the arm starts
+    snap_gap=0.8,                       # slot that frees the arm from the frame rim
+    snap_barb=0.9, snap_top=2.6,        # barb depth, arm height above the frame top
+    snap_clear=0.25, snap_flex=1.2, snap_side=0.4,  # pocket clearances: outer face, flex room, sides
+    snap_lip=1.0, snap_pocket=3.2,      # lip height and pocket depth in the tile
     # wall frame
-    frame_Ro=117.0, frame_Ri=103.0, frame_h=14.0,
+    frame_Ro=119.7, frame_Ri=104.0, frame_h=14.0,   # outer size = tile size (flush), same grid gap
+    # wall mounting: 3 countersunk screws (frame doubles as drilling template)
+    screw_d=4.5, screw_head_d=8.6, flange_t=4.0,
 )
 FONT_BOLD = FontProperties(family="DejaVu Sans", weight="bold")
 FONT_REG = FontProperties(family="DejaVu Sans", weight="normal")
@@ -87,6 +113,71 @@ def bowtie(offset=0.0):
     return poly.buffer(offset, join_style=2) if offset else poly
 
 
+def locator_positions():
+    """Hole / pin centres in the 6 corners."""
+    return [(P["loc_r"] * math.cos(math.radians(60 * k)), P["loc_r"] * math.sin(math.radians(60 * k)))
+            for k in range(6)]
+
+
+def edge_transform(theta_deg, apothem):
+    """4x4 matrix: local edge coordinates -> world.
+    u runs along the edge, v points inwards from the outer edge, z stays z."""
+    s, c = math.sin(math.radians(theta_deg)), math.cos(math.radians(theta_deg))
+    return np.array([[-s, -c, 0, c * apothem],
+                     [c, -s, 0, s * apothem],
+                     [0, 0, 1, 0],
+                     [0, 0, 0, 1]], dtype=float)
+
+
+def snap_sites():
+    """(edge angle, offset along the edge) of the 4 snap latches: top and bottom edge."""
+    u = P["snap_u"]
+    return [(90, u), (90, -u), (270, u), (270, -u)]
+
+
+def extrude_vz(profile, w):
+    """Extrude a (v, z) profile along u from -w to +w (edge-local coordinates)."""
+    m = trimesh.creation.extrude_polygon(Polygon(profile), 2 * w)   # X = v, Y = z, Z = u + w
+    m.apply_transform(np.array([[0, 0, 1, -w], [1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1]], dtype=float))
+    return m
+
+
+def snap_arm_parts(v_in, H):
+    """Frame side of one latch in edge-local coordinates: (cut, arm).
+    The cut frees a block of the rim; the arm (one solid incl. barb) is added back,
+    anchored 0.5 mm deep in the solid rim below snap_base."""
+    w, t, g, b = P["snap_w"] / 2, P["snap_t"], P["snap_gap"], P["snap_barb"]
+    v_out = v_in - t                                   # outer face of the arm
+    z0, top = P["snap_base"], H + P["snap_top"]
+    cut = trimesh.creation.box(bounds=[[-w - g, v_out - g, z0], [w + g, v_in + 1, H + 1]])
+    # arm profile (v, z) incl. barb: 45 degree retention face below, lead-in chamfer on top
+    arm = extrude_vz([(v_out, z0 - 0.5), (v_in - 0.05, z0 - 0.5), (v_in - 0.05, top), (v_out, top),
+                      (v_out - b, H + 1.1 + b), (v_out - b, H + 0.8 + b), (v_out, H + 0.8)], w)
+    return [cut], [arm]
+
+
+def snap_pocket(v_in):
+    """Tile side of one latch (edge-local, tile back at z = 0): neck + wider catch zone
+    above the lip, as one solid."""
+    w = P["snap_w"] / 2 + P["snap_side"]
+    v_out = v_in - P["snap_t"]
+    v_neck = v_out - P["snap_clear"]
+    v_catch = v_out - P["snap_barb"] - 0.3
+    v_far = v_in + P["snap_flex"]
+    lip, depth = P["snap_lip"], P["snap_pocket"]
+    return [extrude_vz([(v_neck, -1), (v_far, -1), (v_far, depth), (v_catch, depth),
+                        (v_catch, lip), (v_neck, lip)], w)]
+
+
+def chamfered_pin(cx, cy, d, z0, h, ch, sections=48):
+    """Vertical pin with a 45 degree lead-in chamfer at the top."""
+    r = d / 2
+    prof = np.array([[0, 0], [r, 0], [r, h - ch], [r - ch, h], [0, h]], dtype=float)
+    m = trimesh.creation.revolve(prof, sections=sections)
+    m.apply_translation([cx, cy, z0])
+    return m
+
+
 def as_polys(geom):
     """Return the polygons contained in any shapely geometry."""
     if geom.is_empty:
@@ -113,12 +204,17 @@ def extrude(geom, z0, z1):
 
 
 def boolean(op, a, b):
-    """Boolean difference or union using the manifold engine."""
+    """Boolean difference or union using the manifold engine. b may be one mesh or a list.
+    Never pass overlapping meshes merged with trimesh.util.concatenate: their overlap is
+    counted twice and stays solid (e.g. a plug inside a countersunk hole)."""
     if b is None:
         return a
+    bs = [m for m in (b if isinstance(b, (list, tuple)) else [b]) if m is not None]
+    if not bs:
+        return a
     if op == "diff":
-        return trimesh.boolean.difference([a, b], engine="manifold")
-    return trimesh.boolean.union([a, b], engine="manifold")
+        return trimesh.boolean.difference([a] + bs, engine="manifold")
+    return trimesh.boolean.union([a] + bs, engine="manifold")
 
 
 def cylinder_xy(cx, cy, d, z0, z1, sections=48):
@@ -293,7 +389,7 @@ def fmt_km(dist_m):
 # --------------------------------------------------------------------------
 # Parts
 # --------------------------------------------------------------------------
-def build_tile(route_xy, fields, with_dovetails=True, with_magnets=True):
+def build_tile(route_xy, fields):
     """Return (base, text, orange) meshes plus the 2D shapes for the preview."""
     R, T = P["R"], P["base_t"]
     hexg = hexagon(R)
@@ -341,21 +437,20 @@ def build_tile(route_xy, fields, with_dovetails=True, with_magnets=True):
     # ---- base plate --------------------------------------------------------
     base = extrude(hexg, 0, T)
     cuts = [extrude(stadium(0, P["slot_y"], P["slot_w"], P["slot_h"]), -1, T + 1)]
-    if with_dovetails:
-        a = R * math.cos(math.radians(30))     # apothem = distance to edge midpoint
-        for k in range(6):
-            th = 30 + 60 * k
-            bt = affinity.rotate(bowtie(), th, origin=(0, 0))
-            bt = affinity.translate(bt, a * math.cos(math.radians(th)), a * math.sin(math.radians(th)))
-            cuts.append(extrude(bt, -1, P["dt_depth"]))
-    if with_magnets:
-        for k in range(6):
-            th = math.radians(60 * k)
-            cuts.append(cylinder_xy(P["mag_r"] * math.cos(th), P["mag_r"] * math.sin(th),
-                                    P["mag_d"], -1, P["mag_depth"]))
+    # corner holes for the frame's locating pins
+    for x, y in locator_positions():
+        cuts.append(cylinder_xy(x, y, P["loc_hole_d"], -1, P["loc_hole_depth"]))
     for sx in (-1, 1):
         cuts.append(cylinder_xy(sx * P["pin_dx"], P["clamp_y"], P["pin_hole_d"], -1, P["pin_hole_depth"]))
-    base = boolean("diff", base, trimesh.util.concatenate([c for c in cuts if c is not None]))
+    # pockets with undercut for the 4 snap latches of the frame
+    apo = P["frame_Ro"] * math.cos(math.radians(30))           # same reference as the latches
+    v_in = (P["frame_Ro"] - P["frame_Ri"]) * math.cos(math.radians(30))
+    for theta, u in snap_sites():
+        M = edge_transform(theta, apo) @ trimesh.transformations.translation_matrix([u, 0, 0])
+        for p in snap_pocket(v_in):
+            p.apply_transform(M)
+            cuts.append(p)
+    base = boolean("diff", base, cuts)
 
     text_mesh = extrude(white, T, z_text)
     orange_mesh = extrude(orange, T, z_or)
@@ -363,33 +458,103 @@ def build_tile(route_xy, fields, with_dovetails=True, with_magnets=True):
 
 
 def build_frame():
-    """Hex ring that is screwed to the wall; the tile sticks to it with magnets."""
+    """Hex ring that is screwed to the wall, same outer size as the tile.
+    - 6 chamfered pins fit into the corner holes of the tile and carry its weight
+    - 4 snap latches hold the tile against the frame (pull hard to remove it)
+    - dovetail pockets on the front side: neighbouring frames are joined with keys
+    - 3 countersunk screw holes in flat flanges on the wall side"""
     Ro, Ri, H = P["frame_Ro"], P["frame_Ri"], P["frame_h"]
+    apo = Ro * math.cos(math.radians(30))
+    v_in = (Ro - Ri) * math.cos(math.radians(30))
     ring = hexagon(Ro).difference(hexagon(Ri))
-    # tabs on the inside at the top that carry the keyholes
-    tabs = [box(sx * 45 - 11, 68, sx * 45 + 11, Ri * math.cos(math.radians(30)) + 1) for sx in (-1, 1)]
-    outline = unary_union([ring] + [t.intersection(hexagon(Ro)) for t in tabs])
-    frame = extrude(outline, 0, H)
-    cuts = []
-    for sx in (-1, 1):
-        cx, y_in, y_top = sx * 45, 76.0, 84.0
-        cuts.append(cylinder_xy(cx, y_in, 9.5, -1, 9))                                                  # entry hole
-        cuts.append(extrude(stadium(cx, (y_in + y_top) / 2, y_top - y_in + 4.4, 4.4, 90), -1, 3.2))   # shank slot
-        cuts.append(extrude(stadium(cx, (y_in + y_top) / 2, y_top - y_in + 9.5, 9.5, 90), 3.0, 9))    # head chamber
+    # flat flanges on the wall side (2 top, 1 bottom) with countersunk screw holes. Without
+    # keyholes the frame does not have to slide when hung, so it can be keyed to its neighbour
+    # first and then used as drilling template.
+    ia = Ri * math.cos(math.radians(30))
+    ft = P["flange_t"]
+    flanges = [box(sx * 45 - 11, 68, sx * 45 + 11, ia + 1) for sx in (-1, 1)] + [box(-11, -ia - 1, 11, -68)]
+    frame = extrude(ring, 0, H)
+    frame = boolean("union", frame, extrude(unary_union([f.intersection(hexagon(Ro)) for f in flanges]), 0, ft))
+    cuts, adds = [], []
+    rs, rh = P["screw_d"] / 2, P["screw_head_d"] / 2
+    for cx, cy in ((-45, 80), (45, 80), (0, -80)):
+        cuts.append(cylinder_xy(cx, cy, P["screw_d"], -1, ft + 1))
+        cs = trimesh.creation.revolve(np.array([[0, ft - (rh - rs)], [rs, ft - (rh - rs)], [rh, ft],
+                                                [rh, ft + 1], [0, ft + 1]], dtype=float), sections=48)
+        cs.apply_translation([cx, cy, 0])                     # 90 degree countersink
+        cuts.append(cs)
+    # dovetail pockets on the FRONT side (under the tile): keys can be inserted while the frames
+    # hang on the wall. Waist exactly on the grid edge, so both neighbours share the key.
+    a = P["grid_R"] * math.cos(math.radians(30))
+    W2 = P["dt_waist"] / 2 + 0.2
+    pocket = unary_union([bowtie(), box(-0.2, -W2, P["dt_len"], W2)])
     for k in range(6):
-        th = math.radians(60 * k)
-        cuts.append(cylinder_xy(P["mag_r"] * math.cos(th), P["mag_r"] * math.sin(th),
-                                P["mag_d"], H - P["mag_depth"], H + 1))
-    return boolean("diff", frame, trimesh.util.concatenate(cuts))
+        th = 30 + 60 * k
+        bt = affinity.rotate(pocket, th, origin=(0, 0))
+        bt = affinity.translate(bt, a * math.cos(math.radians(th)), a * math.sin(math.radians(th)))
+        cuts.append(extrude(bt, H - P["dt_depth"], H + 1))
+    # snap latches
+    for theta, u in snap_sites():
+        M = edge_transform(theta, apo) @ trimesh.transformations.translation_matrix([u, 0, 0])
+        c, ad = snap_arm_parts(v_in, H)
+        for m in c + ad:
+            m.apply_transform(M)
+        cuts += c
+        adds += ad
+    frame = boolean("diff", frame, cuts)
+    # locating pins on top (slightly overlapping the frame so the union is solid)
+    adds += [chamfered_pin(x, y, P["loc_pin_d"], H - 0.01, P["loc_pin_h"] + 0.01, P["loc_pin_chamfer"])
+             for x, y in locator_positions()]
+    return boolean("union", frame, adds)
 
 
 def build_clamp():
-    """Bar with two pins that presses the ribbon against the back of the tile."""
+    """Bar that pinches both ribbon plies against the back of the tile, right below the
+    slot. Two slotted pins are pressed into the holes; two ridges improve the grip."""
     L, W, T = P["clamp_len"], P["clamp_w"], P["clamp_t"]
     bar = extrude(stadium(0, 0, L, W), 0, T)
-    pins = trimesh.util.concatenate([cylinder_xy(sx * P["pin_dx"], 0, P["pin_d"], T - 0.01, T + P["pin_len"])
-                                     for sx in (-1, 1)])
-    return boolean("union", bar, pins)
+    ridges = [extrude(box(-24, y - 0.5, 24, y + 0.5), T - 0.01, T + 0.5) for y in (-2.0, 2.0)]
+    pins = []
+    for sx in (-1, 1):
+        pin = chamfered_pin(sx * P["pin_dx"], 0, P["pin_d"], T - 0.01, P["pin_len"] + 0.01, 0.6)
+        slit = trimesh.creation.box(bounds=[[sx * P["pin_dx"] - P["pin_slit"] / 2, -3, T + 0.6],
+                                            [sx * P["pin_dx"] + P["pin_slit"] / 2, 3, T + P["pin_len"] + 1]])
+        pins.append(boolean("diff", pin, slit))
+    return boolean("union", bar, ridges + pins)
+
+
+def build_winder():
+    """Flat card for the excess ribbon: put it into the end of the ribbon loop and roll the
+    loop up on the narrow waist; the wide ends keep the ribbon from slipping off."""
+    hl, hw = P["winder_len"] / 2, P["winder_w"] / 2
+    wl, ww = P["winder_waist_len"] / 2, P["winder_waist_w"] / 2
+    shape = unary_union([box(-hl, -hw, -wl, hw), box(wl, -hw, hl, hw), box(-wl, -ww, wl, ww)])
+    shape = shape.buffer(1.0, join_style=1).buffer(-2.0, join_style=1).buffer(1.0, join_style=1)  # round corners
+    return extrude(shape, 0, P["winder_t"])
+
+
+def build_winder_clips(n=2):
+    """U-shaped spring clips. After rolling the ribbon onto the winder card, push a clip
+    over the card from its long edge: the arms press the wound ribbon onto the card, so it
+    cannot unwind. The arms open from 3 mm (bare card) to about 10 mm of wound ribbon.
+    Printed lying flat (U-shape on the bed), no supports."""
+    g, L, t, b = P["clip_gap"], P["clip_arm"], P["clip_t"], P["clip_bump"]
+    h = g / 2
+    # U-profile in the print plane: x = along the arms, y = across (card thickness)
+    spine = box(-t, -h - t, 0, h + t)
+    arms = [box(0, h, L, h + t), box(0, -h - t, L, -h)]
+    bumps = [Polygon([(L - 4, h), (L - 2, h - b), (L - 1, h - b), (L, h)]),          # pressure bumps
+             Polygon([(L - 4, -h), (L - 2, -h + b), (L - 1, -h + b), (L, -h)])]
+    flares = [Polygon([(L, h), (L, h + t), (L + 2.5, h + t + 1.2), (L + 2.5, h + 1.2)]),  # lead-in
+              Polygon([(L, -h), (L, -h - t), (L + 2.5, -h - t - 1.2), (L + 2.5, -h - 1.2)])]
+    shape = unary_union([spine] + arms + bumps + flares).buffer(0.2, join_style=1).buffer(-0.2, join_style=1)
+    clip = extrude(shape, 0, P["clip_w"])
+    clips = []
+    for i in range(n):
+        m = clip.copy()
+        m.apply_translation([0, i * (g + 2 * t + 6), 0])
+        clips.append(m)
+    return trimesh.util.concatenate(clips)
 
 
 def build_keys(n=6):
@@ -738,7 +903,8 @@ def main():
     ap.add_argument("--smooth", type=float, default=P["smooth"],
                     help="GPS track smoothing in mm (default 0.9, 0 = off, 1.5 = very smooth)")
     ap.add_argument("--out", help="output folder (default: next to the GPX)")
-    ap.add_argument("--no-frame", action="store_true", help="do not generate wall frame, ribbon clamp and keys")
+    ap.add_argument("--no-frame", action="store_true",
+                    help="do not generate wall frame and keys (only if you already printed a spare frame)")
     a = ap.parse_args()
     P["smooth"] = a.smooth
 
@@ -788,11 +954,15 @@ def main():
     parts = [("Tile base", base, 1, COL_BASE),
              ("Text white", text_m, 2, COL_TEXT),
              ("Route, title + time orange", orange_m, 3, COL_ORANGE)]
-    frame = clamp = keys = None
+    # every medal needs its own clamp, winder and clips; frame + keys can be skipped
+    clamp, winder, clips = build_clamp(), build_winder(), build_winder_clips()
+    files["ribbon_clamp.stl"] = clamp
+    files["ribbon_winder.stl"] = winder
+    files["winder_clips_2x.stl"] = clips
+    frame = keys = None
     if not a.no_frame:
-        frame, clamp, keys = build_frame(), build_clamp(), build_keys()
+        frame, keys = build_frame(), build_keys()
         files["wall_frame.stl"] = frame
-        files["ribbon_clamp.stl"] = clamp
         files["connector_keys_6x.stl"] = keys
 
     path_3mf = os.path.join(out, f"{stem}_tile_multicolor.3mf")
@@ -801,10 +971,13 @@ def main():
         # native Bambu project: plate 1 = tile (3 colours), plate 2 = accessories (filament 1)
         objects = [dict(name=race, plate=0, pos=(128.0, 128.0),
                         parts=[(n, m, e) for n, m, e, _ in parts])]
+        # plate 2: small parts inside the frame opening
+        objects += [dict(name="Ribbon clamp", plate=1, pos=(128.0, 150.0), parts=[("Ribbon clamp", clamp, 1)]),
+                    dict(name="Ribbon winder", plate=1, pos=(128.0, 183.0), parts=[("Ribbon winder", winder, 1)]),
+                    dict(name="Winder clips", plate=1, pos=(128.0, 72.0), parts=[("Winder clips", clips, 1)])]
         if frame is not None:
             objects += [dict(name="Wall frame", plate=1, pos=(128.0, 128.0), parts=[("Wall frame", frame, 1)]),
-                        dict(name="Ribbon clamp", plate=1, pos=(128.0, 150.0), parts=[("Ribbon clamp", clamp, 1)]),
-                        dict(name="Connector keys", plate=1, pos=(128.0, 100.0), parts=[("Connector keys", keys, 1)])]
+                        dict(name="Connector keys", plate=1, pos=(128.0, 103.0), parts=[("Connector keys", keys, 1)])]
         write_bambu_project(path_3mf, objects, template, race)
     else:
         # fallback: standard 3MF (Bambu Studio loads geometry + colours only)
